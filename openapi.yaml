@@ -1,0 +1,102 @@
+openapi: 3.0.0
+info:
+  title: Gemini Omni Plugin
+  description: 集成 Google Gemini (对话/识图) 和 Imagen 3 (文生图) 的全能插件。v2.0
+  version: 2.0.0
+servers:
+  # ⚠️⚠️⚠️ 部署后请务必修改这里的 URL ⚠️⚠️⚠️
+  - url: https://你的-RENDER-服务地址.onrender.com
+paths:
+  # === 原有接口: 对话 ===
+  /api/gemini/chat:
+    post:
+      operationId: gemini_chat
+      summary: Gemini 多模态对话 (识图+聊天)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                api_key:
+                  type: string
+                  description: Google Gemini API Key
+                query:
+                  type: string
+                  description: 提示词文本 (如果只传图片可为空)
+                image_urls:
+                  type: array
+                  items:
+                    type: string
+                  description: 图片 URL 列表 (用于识图)
+                model_name:
+                  type: string
+                  description: 对话模型名称 (如 gemini-1.5-pro, gemini-2.0-flash-exp)
+                  default: gemini-1.5-flash
+              required:
+                - api_key
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: string
+                    description: AI 回复的文本
+                  used_model:
+                    type: string
+
+  # === 新增接口: 画图 ===
+  /api/gemini/image_gen:
+    post:
+      operationId: imagen_generate
+      summary: Imagen 3 文生图 (生成图片)
+      description: 调用 Google Imagen 3 模型生成图像。支持负面提示词和比例控制。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                api_key:
+                  type: string
+                  description: Google Gemini API Key
+                prompt:
+                  type: string
+                  description: 正向提示词 (描述你想要画什么，建议用英文)
+                negative_prompt:
+                  type: string
+                  description: 负面提示词 (描述你不想要的内容，如 ugly, deformed, bad quality)
+                aspect_ratio:
+                  type: string
+                  description: 图片长宽比 (默认 1:1)
+                  default: "1:1"
+                  # Dify 会这里渲染成下拉菜单
+                  enum: ["1:1", "16:9", "9:16", "4:3", "3:4", "21:9"]
+              required:
+                - api_key
+                - prompt
+      responses:
+        "200":
+          description: 成功生成图像
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  # Dify 会识别这个字段并显示为图片
+                  image_file:
+                    type: string
+                    description: Base64 image data URI
+                  info:
+                    type: string
+                    description: 生成信息
+        "400":
+          description: 请求错误 (如被安全拦截)
+        "500":
+          description: 服务器错误
