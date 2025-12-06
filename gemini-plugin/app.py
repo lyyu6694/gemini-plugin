@@ -1,4 +1,6 @@
 import os
+import io
+import base64
 import requests
 import google.generativeai as genai
 from flask import Flask, request, jsonify
@@ -6,49 +8,44 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 app = Flask(__name__)
 
-# 默认配置
-DEFAULT_MODEL = "gemini-1.5-flash"
+# --- 配置区域 ---
+DEFAULT_CHAT_MODEL = "gemini-1.5-flash"
+# Imagen 3 画图模型名称
+IMAGEN_MODEL_NAME = "imagen-3.0-generate-001"
+# ----------------
 
 def download_image(url):
-    """下载图片并转换为 Gemini SDK 需要的数据格式"""
+    """(聊天用) 下载图片并转换为 Gemini SDK 需要的数据格式"""
     try:
-        # 设置 User-Agent 防止被某些图床拦截
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        content_type = response.headers.get('Content-Type', 'image/jpeg')
-        return {
-            "mime_type": content_type,
-            "data": response.content
-        }
+        return {"mime_type": response.headers.get('Content-Type', 'image/jpeg'), "data": response.content}
     except Exception as e:
         print(f"Error downloading image {url}: {e}")
         return None
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return jsonify({"status": "ok", "service": "Gemini Native Plugin"}), 200
+    return jsonify({"status": "ok", "service": "Gemini Omni Plugin v2 (Chat + Image Gen)"}), 200
 
+# ===========================
+# 接口 A: 原有的对话/识图接口 (保持不变)
+# ===========================
 @app.route('/api/gemini/chat', methods=['POST'])
 def chat():
     data = request.json
-    
-    # 1. 获取参数
     api_key = data.get('api_key')
     query = data.get('query', '')
     image_urls = data.get('image_urls', [])
-    model_name = data.get('model_name', DEFAULT_MODEL)
+    model_name = data.get('model_name', DEFAULT_CHAT_MODEL)
 
-    # 校验
-    if not api_key:
-        return jsonify({"error": "Missing api_key"}), 401
-    if not query and not image_urls:
-        return jsonify({"error": "Query or image_urls must be provided"}), 400
+    if not api_key: return jsonify({"error": "Missing api_key"}), 401
+    # 允许仅传图片的情况
+    if not query and not image_urls: return jsonify({"error": "Query or image_urls must be provided"}), 400
 
-    # 2. 配置 Gemini
     genai.configure(api_key=api_key)
-    
-    # 安全设置：全放开，避免拒答
+    # 对话安全设置：尽可能放开
     safety_settings = {
         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -57,34 +54,85 @@ def chat():
     }
 
     try:
-        # 3. 准备 Prompt 内容
         prompt_parts = []
-        if query:
-            prompt_parts.append(query)
-            
+        if query: prompt_parts.append(query)
         if image_urls:
-            # 兼容字符串格式输入 (逗号分隔)
-            if isinstance(image_urls, str):
-                image_urls = [url.strip() for url in image_urls.split(',') if url.strip()]
-            
+            if isinstance(image_urls, str): image_urls = [url.strip() for url in image_urls.split(',') if url.strip()]
             for url in image_urls:
                 img_data = download_image(url)
-                if img_data:
-                    prompt_parts.append(img_data)
-                else:
-                    return jsonify({"error": f"Failed to download image: {url}"}), 400
-
-        # 4. 调用模型
+                if img_data: prompt_parts.append(img_data)
+                else: return jsonify({"error": f"Failed to download image: {url}"}), 400
+        
         model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt_parts, safety_settings=safety_settings)
+        return jsonify({"result": response.text, "used_model": model_name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-        # 5. 返回结果
+# ===========================
+# 接口 B: (新增) Imagen 文生图接口
+# ===========================
+@app.route('/api/gemini/image_gen', methods=['POST'])
+def image_gen():
+    data = request.json
+    
+    # 1. 获取参数
+    api_key = data.get('api_key')
+    prompt = data.get('prompt')
+    negative_prompt = data.get('negative_prompt')
+    aspect_ratio = data.get('aspect_ratio', '1:1')
+
+    if not api_key: return jsonify({"error": "Missing api_key"}), 401
+    if not prompt: return jsonify({"error": "Missing prompt"}), 400
+
+    # 2. 配置 Gemini
+    genai.configure(api_key=api_key)
+
+    try:
+        # 3. 调用 Imagen 模型
+        imagen_model = genai.ImageGenerationModel(IMAGEN_MODEL_NAME)
+        
+        # 构建生成参数
+        generation_config = {
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "number_of_images": 1, 
+            # 画图的安全等级，block_only_high 相对宽松
+            "safety_filter_level": "block_only_high" 
+        }
+        # 如果有负面提示词则添加
+        if negative_prompt and negative_prompt.strip():
+            generation_config['negative_prompt'] = negative_prompt.strip()
+
+        print(f"Generating image with config: {generation_config}")
+        response = imagen_model.generate_images(**generation_config)
+
+        # 4. 处理结果并转换为 Base64
+        if not response.images:
+             return jsonify({"error": "Image generation failed. It might be blocked by safety filters."}), 400
+             
+        # 获取第一张图 (PIL Image 对象)
+        image_obj = response.images[0]
+        
+        # 将 PIL Image 对象保存为内存中的字节流 (PNG格式)
+        img_byte_arr = io.BytesIO()
+        image_obj.save(img_byte_arr, format='PNG')
+        img_byte_arr = img_byte_arr.getvalue()
+        
+        # 转换为 base64 字符串并添加 Data URI 头
+        base64_encoded_data = base64.b64encode(img_byte_arr).decode('utf-8')
+        base64_data_uri = f"data:image/png;base64,{base64_encoded_data}"
+
+        # 5. 返回 Dify 识别的格式
+        # Dify 能够识别包含 base64 data URI 的 JSON 字段并将其实例化为图片文件
         return jsonify({
-            "result": response.text,
-            "used_model": model_name
+            "image_file": base64_data_uri, 
+            "info": f"Generated by {IMAGEN_MODEL_NAME}, AR: {aspect_ratio}"
         })
 
     except Exception as e:
+        print(f"Imagen Error: {e}")
+        # 返回更详细的错误信息以便调试
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
