@@ -1,0 +1,49 @@
+openapi: 3.0.0
+info:
+  title: Gemini Native API Plugin
+  description: 封装 Google Gemini 原生接口，支持多模态识图与自定义模型切换。
+  version: 1.0.0
+servers:
+  - url: https://YOUR-APP-URL.onrender.com
+paths:
+  /api/gemini/chat:
+    post:
+      operationId: gemini_chat
+      summary: Gemini 多模态对话
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                api_key:
+                  type: string
+                  description: Google Gemini API Key
+                query:
+                  type: string
+                  description: 提示词
+                image_urls:
+                  type: array
+                  items:
+                    type: string
+                  description: 图片链接列表
+                model_name:
+                  type: string
+                  description: 模型名称 (如 gemini-1.5-pro, gemini-3-pro-preview)
+                  default: gemini-1.5-flash
+              required:
+                - api_key
+                - query
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: string
+                  used_model:
+                    type: string
